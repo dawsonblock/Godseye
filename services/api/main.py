@@ -172,6 +172,23 @@ async def get_objects(
         return JSONResponse({"data": results})
 
 
+@app.get("/api/history/{entity_id}")
+async def get_history(
+    entity_id: str, limit: int = Query(100, description="Max points to return")
+):
+    async with get_db() as conn:
+        query = """
+            SELECT lat, lon, alt_m
+            FROM objects_history
+            WHERE id = $1
+            ORDER BY ts DESC
+            LIMIT $2;
+        """
+        rows = await conn.fetch(query, entity_id, limit)
+        results = [dict(r) for r in rows]
+        return JSONResponse({"data": results})
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)

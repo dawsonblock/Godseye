@@ -68,6 +68,9 @@ services:
     depends_on:
       - api
     env_file: .env
+    volumes:
+      - ./services/viewer:/app
+      - /app/node_modules
 
 volumes:
   pgdata:

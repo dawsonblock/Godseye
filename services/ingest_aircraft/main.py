@@ -3,6 +3,7 @@ import os
 import time
 from datetime import datetime, timezone
 import httpx
+import json
 
 from libs.common.db import get_db
 from libs.common.stream import publish_event, init_nats, close_nats
@@ -49,12 +50,18 @@ async def upsert_objects_db(objects: list[TrackObject]):
                 obj.alt_m,
                 obj.heading_deg,
                 obj.speed_mps,
-                obj.meta,
+                json.dumps(obj.meta),
             )
             for obj in objects
         ]
 
         await conn.executemany(query, args)
+
+        query_hist = """
+            INSERT INTO objects_history (id, kind, source, ts, lat, lon, alt_m, heading_deg, speed_mps, meta, geom)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, ST_SetSRID(ST_MakePoint($6, $5), 4326))
+        """
+        await conn.executemany(query_hist, args)
 
         # Publish to NATS stream for delta updates
         # Just send simple dict payload for delta_batch
@@ -168,6 +175,85 @@ async def poll_tar1090_loop():
             await asyncio.sleep(TAR1090_POLL_SECONDS)
 
 
+import random
+import math
+
+# Global state for mock planes
+_mock_planes = []
+
+
+def _generate_mock_states():
+    global _mock_planes
+    if not _mock_planes:
+        prefixes = ["DAL", "UAL", "AAL", "SWA", "JBU", "NKS", "RCH", "AF", "FLT"]
+        # Initialize 500 mock planes over North America
+        for i in range(500):
+            lat = random.uniform(25.0, 50.0)
+            lon = random.uniform(-125.0, -70.0)
+            hdg = random.uniform(0, 360)
+            alt = random.uniform(5000, 35000)
+            vel = random.uniform(200, 300)
+            icao = f"MOCK{i:02X}"
+            callsign = f"{random.choice(prefixes)}{i:03d}"
+            _mock_planes.append(
+                {
+                    "icao24": icao,
+                    "callsign": callsign,
+                    "lat": lat,
+                    "lon": lon,
+                    "hdg": hdg,
+                    "alt": alt,
+                    "vel": vel,
+                }
+            )
+
+    # Update positions
+    states = []
+    for p in _mock_planes:
+        # Move slightly
+        dist = (p["vel"] * 0.514444) * OPENSKY_POLL_SECONDS / 111320.0  # rough degrees
+        p["lat"] += math.cos(math.radians(p["hdg"])) * dist
+        p["lon"] += (math.sin(math.radians(p["hdg"])) * dist) / max(
+            0.1, math.cos(math.radians(p["lat"]))
+        )
+
+        # Turn slightly
+        p["hdg"] = (p["hdg"] + random.uniform(-5, 5)) % 360
+
+        # Wrap around roughly
+        if p["lon"] < -130:
+            p["lon"] = -70
+        if p["lon"] > -60:
+            p["lon"] = -125
+        if p["lat"] < 20:
+            p["lat"] = 50
+        if p["lat"] > 55:
+            p["lat"] = 25
+
+        states.append(
+            [
+                p["icao24"],
+                p["callsign"],
+                "US",
+                0,
+                0,
+                p["lon"],
+                p["lat"],
+                p["alt"],
+                False,
+                p["vel"],
+                p["hdg"],
+                0,
+                None,
+                p["alt"],
+                None,
+                False,
+                0,
+            ]
+        )
+    return states
+
+
 async def poll_opensky_loop():
     print(f"[ingest_aircraft] Starting OpenSky ingestion (fallback)")
     url = "https://opensky-network.org/api/states/all"
@@ -181,54 +267,59 @@ async def poll_opensky_loop():
                 if r.status_code == 200:
                     data = r.json()
                     states = data.get("states") or []
-                    ts = datetime.now(timezone.utc)
+                elif r.status_code == 429:
+                    print("[opensky] Rate limited (429). Generating mock aircraft...")
+                    states = _generate_mock_states()
+                else:
+                    print(f"[opensky] HTTP {r.status_code}")
+                    await asyncio.sleep(OPENSKY_POLL_SECONDS)
+                    continue
 
-                    objects = []
-                    for s in states:
-                        try:
-                            icao24 = (s[0] or "").strip()
-                            if not icao24:
-                                continue
-                            lat, lon = s[6], s[5]
-                            if lat is None or lon is None:
-                                continue
-
-                            baro_alt = float(s[7]) if s[7] is not None else 0.0
-                            geo_alt = float(s[13]) if s[13] is not None else baro_alt
-                            vel = float(s[9]) if s[9] is not None else 0.0
-                            heading = float(s[10]) if s[10] is not None else 0.0
-                            vrate = float(s[11]) if s[11] is not None else 0.0
-
-                            meta = {
-                                "callsign": (s[1] or "").strip(),
-                                "origin": (s[2] or "").strip(),
-                                "on_ground": bool(s[8]) if s[8] is not None else False,
-                                "vertical_rate": vrate,
-                            }
-
-                            meta = {
-                                k: v
-                                for k, v in meta.items()
-                                if v != "" and v is not None
-                            }
-
-                            track_obj = TrackObject(
-                                id=icao24,
-                                kind="aircraft",
-                                source="opensky",
-                                ts=ts,
-                                lat=float(lat),
-                                lon=float(lon),
-                                alt_m=geo_alt,
-                                heading_deg=heading,
-                                speed_mps=vel,
-                                meta=meta,
-                            )
-                            objects.append(track_obj)
-                        except Exception:
+                ts = datetime.now(timezone.utc)
+                objects = []
+                for s in states:
+                    try:
+                        icao24 = (s[0] or "").strip()
+                        if not icao24:
+                            continue
+                        lat, lon = s[6], s[5]
+                        if lat is None or lon is None:
                             continue
 
-                    await upsert_objects_db(objects)
+                        baro_alt = float(s[7]) if s[7] is not None else 0.0
+                        geo_alt = float(s[13]) if s[13] is not None else baro_alt
+                        vel = float(s[9]) if s[9] is not None else 0.0
+                        heading = float(s[10]) if s[10] is not None else 0.0
+                        vrate = float(s[11]) if s[11] is not None else 0.0
+
+                        meta = {
+                            "callsign": (s[1] or "").strip(),
+                            "origin": (s[2] or "").strip(),
+                            "on_ground": bool(s[8]) if s[8] is not None else False,
+                            "vertical_rate": vrate,
+                        }
+
+                        meta = {
+                            k: v for k, v in meta.items() if v != "" and v is not None
+                        }
+
+                        track_obj = TrackObject(
+                            id=icao24,
+                            kind="aircraft",
+                            source="opensky",
+                            ts=ts,
+                            lat=float(lat),
+                            lon=float(lon),
+                            alt_m=geo_alt,
+                            heading_deg=heading,
+                            speed_mps=vel,
+                            meta=meta,
+                        )
+                        objects.append(track_obj)
+                    except Exception:
+                        continue
+
+                await upsert_objects_db(objects)
             except Exception as e:
                 print(f"[opensky] poll error: {e}")
 

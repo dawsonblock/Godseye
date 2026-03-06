@@ -158,6 +158,12 @@ async def propagate_loop():
                     ]
                     await conn.executemany(query, args)
 
+                    query_hist = """
+                        INSERT INTO objects_history (id, kind, source, ts, lat, lon, alt_m, speed_mps, meta, geom)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, ST_SetSRID(ST_MakePoint($6, $5), 4326))
+                    """
+                    await conn.executemany(query_hist, args)
+
                     # NATS publish
                     msg = {
                         "type": "delta",
