@@ -1,0 +1,1126 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <title>Live Earth Console</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="description"
+    content="Local live Earth visualization console — aircraft, satellites, anomaly detection." />
+
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.122/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.122/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/satellite.js@5.0.1/dist/satellite.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet" />
+
+  <style>
+    :root {
+      --bg: #060a13;
+      --panel: rgba(8, 12, 22, 0.88);
+      --panel-hover: rgba(12, 18, 32, 0.92);
+      --border: rgba(56, 189, 248, 0.12);
+      --border-hi: rgba(56, 189, 248, 0.30);
+      --accent: #38bdf8;
+      --accent-dim: rgba(56, 189, 248, 0.25);
+      --cyan: #22d3ee;
+      --green: #4ade80;
+      --amber: #fbbf24;
+      --red: #f87171;
+      --magenta: #e879f9;
+      --violet: #a78bfa;
+      --text: #e2e8f0;
+      --text2: #94a3b8;
+      --text3: #64748b;
+      --font: 'Inter', system-ui, -apple-system, sans-serif;
+      --mono: 'JetBrains Mono', ui-monospace, monospace;
+      --r: 10px;
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+
+    #cesiumContainer {
+      position: absolute;
+      inset: 0;
+    }
+
+    /* ─── Shared panel ─────────────────────────────────────── */
+    .pnl {
+      position: absolute;
+      z-index: 10;
+      background: var(--panel);
+      backdrop-filter: blur(24px) saturate(1.4);
+      -webkit-backdrop-filter: blur(24px) saturate(1.4);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      font-size: 12px;
+    }
+
+    /* ─── Top bar ──────────────────────────────────────────── */
+    #topBar {
+      top: 10px;
+      left: 10px;
+      right: 10px;
+      height: 50px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 16px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
+    .logo b {
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      background: linear-gradient(135deg, var(--accent), var(--cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .logo span {
+      font-size: 10px;
+      color: var(--text3);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    #searchBox {
+      flex: 0 1 220px;
+      height: 30px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 0 10px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    #searchBox:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.15);
+    }
+
+    #searchBox::placeholder {
+      color: var(--text3);
+    }
+
+    .stat {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-family: var(--mono);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .stat i {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .stat b {
+      color: #fff;
+      font-weight: 600;
+      font-size: 11px;
+    }
+
+    .badge {
+      font-family: var(--mono);
+      font-size: 9px;
+      letter-spacing: 0.5px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+    }
+
+    .badge.ok {
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    .badge.warn {
+      border-color: var(--amber);
+      color: var(--amber);
+    }
+
+    .badge.err {
+      border-color: var(--red);
+      color: var(--red);
+    }
+
+    #fpsCounter {
+      font-family: var(--mono);
+      font-size: 9px;
+      color: var(--text3);
+      min-width: 40px;
+      text-align: right;
+    }
+
+    /* ─── Left panel ───────────────────────────────────────── */
+    #leftP {
+      top: 70px;
+      left: 10px;
+      width: 234px;
+      bottom: 10px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sec {
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: var(--text3);
+      padding: 10px 14px 6px;
+      flex-shrink: 0;
+    }
+
+    .sec-line {
+      border-bottom: 1px solid var(--border);
+    }
+
+    .toggles {
+      padding: 4px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      flex-shrink: 0;
+    }
+
+    .tr {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 4px;
+      border-radius: 6px;
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.15s;
+    }
+
+    .tr:hover {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .tr input {
+      accent-color: var(--accent);
+      width: 13px;
+      height: 13px;
+      cursor: pointer;
+    }
+
+    .tr label {
+      cursor: pointer;
+      font-size: 11px;
+    }
+
+    /* Event log */
+    #evLog {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 10px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--accent-dim) transparent;
+    }
+
+    #evLog::-webkit-scrollbar {
+      width: 3px;
+    }
+
+    #evLog::-webkit-scrollbar-thumb {
+      background: var(--accent-dim);
+      border-radius: 2px;
+    }
+
+    .ev {
+      padding: 4px 6px;
+      border-radius: 5px;
+      margin-bottom: 1px;
+      font-family: var(--mono);
+      font-size: 9.5px;
+      line-height: 1.4;
+      cursor: pointer;
+      transition: background 0.12s;
+      display: flex;
+      gap: 5px;
+      align-items: baseline;
+    }
+
+    .ev:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .ev .t {
+      color: var(--text3);
+      white-space: nowrap;
+    }
+
+    .ev .k {
+      font-weight: 600;
+    }
+
+    .k.speed_exceed,
+    .k.position_jump {
+      color: var(--red);
+    }
+
+    .k.vertical_rate {
+      color: var(--amber);
+    }
+
+    .k.rapid_turn {
+      color: var(--magenta);
+    }
+
+    .k.zone_entry {
+      color: var(--cyan);
+    }
+
+    /* zone legend */
+    .zl {
+      font-size: 8px;
+      color: var(--text3);
+      padding: 3px 14px;
+      font-family: var(--mono);
+      flex-shrink: 0;
+      line-height: 1.5;
+    }
+
+    .zl em {
+      font-style: normal;
+    }
+
+    .zl .r {
+      color: var(--red);
+    }
+
+    .zl .o {
+      color: var(--amber);
+    }
+
+    .zl .m {
+      color: var(--magenta);
+    }
+
+    /* ─── Bottom bar ───────────────────────────────────────── */
+    #bottomBar {
+      bottom: 10px;
+      left: 254px;
+      right: 10px;
+      height: 110px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #tlRow {
+      height: 34px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    #tlLabel {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--accent);
+      min-width: 60px;
+    }
+
+    #tlSlider {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 3px;
+      border-radius: 2px;
+      background: rgba(255, 255, 255, 0.08);
+      outline: none;
+      cursor: pointer;
+    }
+
+    #tlSlider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), var(--cyan));
+      cursor: pointer;
+      border: 2px solid var(--bg);
+      box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
+    }
+
+    #btnLive {
+      font-family: var(--mono);
+      font-size: 9px;
+      padding: 3px 10px;
+      border: 1px solid var(--green);
+      border-radius: 4px;
+      background: transparent;
+      color: var(--green);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    #btnLive:hover {
+      background: rgba(74, 222, 128, 0.15);
+    }
+
+    #btnLive.on {
+      background: rgba(74, 222, 128, 0.2);
+      box-shadow: 0 0 10px rgba(74, 222, 128, 0.15);
+    }
+
+    /* Inspector */
+    #insp {
+      flex: 1;
+      display: flex;
+      align-items: stretch;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+
+    #insp.vis {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    #inspGrid {
+      flex: 1;
+      padding: 8px 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+      gap: 2px 16px;
+      align-content: center;
+    }
+
+    .ti {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .ti .l {
+      font-size: 8px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text3);
+      font-weight: 600;
+    }
+
+    .ti .v {
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    #inspClose {
+      width: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--text3);
+      font-size: 14px;
+      border-left: 1px solid var(--border);
+      transition: color 0.15s;
+    }
+
+    #inspClose:hover {
+      color: var(--red);
+    }
+
+    /* ─── Right mini stats ─────────────────────────────────── */
+    #miniStats {
+      top: 70px;
+      right: 10px;
+      width: 80px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .ms-row {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .ms-row .ms-l {
+      font-size: 7px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text3);
+      font-weight: 600;
+    }
+
+    .ms-row .ms-v {
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    @media (max-width: 640px) {
+      #leftP {
+        display: none;
+      }
+
+      #bottomBar {
+        left: 10px;
+      }
+
+      #miniStats {
+        display: none;
+      }
+    }
+
+    /* Cesium overrides */
+    .cesium-viewer-bottom {
+      display: none !important;
+    }
+
+    .cesium-viewer-toolbar {
+      right: 100px !important;
+      top: 70px !important;
+    }
+
+    /* selection pulse animation */
+    @keyframes selPulse {
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.4);
+      }
+
+      50% {
+        box-shadow: 0 0 20px 4px rgba(56, 189, 248, 0.15);
+      }
+    }
+
+    #bottomBar.sel-active {
+      animation: selPulse 2s ease infinite;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="cesiumContainer"></div>
+
+  <!-- ═══ TOP BAR ════════════════════════════════════════════ -->
+  <div id="topBar" class="pnl">
+    <div class="logo"><b>Live Earth</b><span>Console</span></div>
+    <input id="searchBox" type="text" placeholder="Search callsign / NORAD…" autocomplete="off" spellcheck="false" />
+    <div class="stat"><i style="background:var(--green)"></i>AC <b id="cAC">0</b></div>
+    <div class="stat"><i style="background:var(--accent)"></i>SAT <b id="cSAT">0</b></div>
+    <div class="stat"><i style="background:var(--magenta)"></i>SL <b id="cSL">0</b></div>
+    <div class="stat"><i style="background:var(--amber)"></i>EV <b id="cEV">0</b></div>
+    <div style="flex:1"></div>
+    <span id="fpsCounter">-- fps</span>
+    <div id="wsBadge" class="badge warn">WS: …</div>
+  </div>
+
+  <!-- ═══ LEFT PANEL ═════════════════════════════════════════ -->
+  <div id="leftP" class="pnl">
+    <div class="sec sec-line">Layers</div>
+    <div class="toggles">
+      <div class="tr"><input id="togAc" type="checkbox" checked /><label for="togAc">✈ Aircraft</label></div>
+      <div class="tr"><input id="togSat" type="checkbox" checked /><label for="togSat">🛰 Satellites</label></div>
+      <div class="tr"><input id="togSL" type="checkbox" checked /><label for="togSL">⭐ Starlink</label></div>
+      <div class="tr"><input id="togTrail" type="checkbox" checked /><label for="togTrail">⟿ Trails</label></div>
+      <div class="tr"><input id="togFollow" type="checkbox" checked /><label for="togFollow">🎯 Follow</label></div>
+      <div class="tr"><input id="togZone" type="checkbox" checked /><label for="togZone">🔺 Alert Zones</label></div>
+    </div>
+    <div class="sec sec-line">Orbit Filter</div>
+    <div class="toggles">
+      <div class="tr"><input id="fLEO" type="checkbox" checked /><label for="fLEO">LEO &lt; 2 000 km</label></div>
+      <div class="tr"><input id="fMEO" type="checkbox" checked /><label for="fMEO">MEO 2k – 35k km</label></div>
+      <div class="tr"><input id="fGEO" type="checkbox" checked /><label for="fGEO">GEO ≥ 35 000 km</label></div>
+    </div>
+    <div class="zl"><span class="r">▮</span> N.Atlantic · <span class="o">▮</span> Mid-East · <span class="m">▮</span>
+      Launch Sites</div>
+    <div class="sec sec-line">Events</div>
+    <div id="evLog"></div>
+  </div>
+
+  <!-- ═══ RIGHT MINI STATS ═══════════════════════════════════ -->
+  <div id="miniStats" class="pnl">
+    <div class="ms-row"><span class="ms-l">Data Age</span><span class="ms-v" id="dataAge">—</span></div>
+    <div class="ms-row"><span class="ms-l">Entities</span><span class="ms-v" id="entCount">0</span></div>
+    <div class="ms-row"><span class="ms-l">Uptime</span><span class="ms-v" id="uptime">0s</span></div>
+  </div>
+
+  <!-- ═══ BOTTOM BAR ═════════════════════════════════════════ -->
+  <div id="bottomBar" class="pnl">
+    <div id="tlRow">
+      <span id="tlLabel">LIVE</span>
+      <input id="tlSlider" type="range" min="0" max="300" value="300" step="1" />
+      <button id="btnLive" class="on">● LIVE</button>
+    </div>
+    <div id="insp">
+      <div id="inspGrid"></div>
+      <div id="inspClose">✕</div>
+    </div>
+  </div>
+
+  <script>
+    /* ########################################################
+       Live Earth Console v3 — Bug-fixed & Enhanced
+       ######################################################## */
+
+    /* ─── SVG ICON FACTORY ─────────────────────────────────── */
+    function mkPlaneSVG(fill) {
+      return "data:image/svg+xml," + encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+      <g transform="translate(16,16)">
+        <path d="M0-13 L2.5-4 L13 3 L13 5 L2.5 1.5 L1.5 9 L5 11 L5 13 L0 11 L-5 13 L-5 11 L-1.5 9 L-2.5 1.5 L-13 5 L-13 3 L-2.5-4Z"
+              fill="${fill}" stroke="rgba(0,0,0,0.5)" stroke-width="0.6"/>
+        <circle cx="0" cy="-1" r="1.2" fill="rgba(255,255,255,0.6)"/>
+      </g>
+    </svg>`);
+    }
+    function mkSatSVG(fill) {
+      return "data:image/svg+xml," + encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+      <g transform="translate(12,12)">
+        <rect x="-10" y="-3" width="7" height="6" rx="1" fill="${fill}" opacity="0.75"/>
+        <rect x="3" y="-3" width="7" height="6" rx="1" fill="${fill}" opacity="0.75"/>
+        <rect x="-2" y="-5" width="4" height="10" rx="1.5" fill="${fill}"/>
+        <circle cx="0" cy="0" r="1.8" fill="rgba(255,255,255,0.85)"/>
+      </g>
+    </svg>`);
+    }
+
+    const PLANE = {
+      gnd: mkPlaneSVG("#94a3b8"),
+      low: mkPlaneSVG("#fb923c"),
+      mid: mkPlaneSVG("#facc15"),
+      hi: mkPlaneSVG("#4ade80"),
+      crz: mkPlaneSVG("#38bdf8"),
+    };
+    const SATIC = {
+      LEO: mkSatSVG("#22d3ee"),
+      MEO: mkSatSVG("#a78bfa"),
+      GEO: mkSatSVG("#fbbf24"),
+      SL: mkSatSVG("#e879f9"),
+    };
+
+    function planeKey(alt, gnd) {
+      if (gnd) return "gnd";
+      if (alt < 2000) return "low";
+      if (alt < 6000) return "mid";
+      if (alt < 10000) return "hi";
+      return "crz";
+    }
+
+    /* ─── CESIUM ───────────────────────────────────────────── */
+    // Cesium.Ion.defaultAccessToken = "YOUR_TOKEN";
+
+    const V = new Cesium.Viewer("cesiumContainer", {
+      timeline: false, animation: false, shouldAnimate: true,
+      baseLayerPicker: true, geocoder: false, sceneModePicker: true,
+      navigationHelpButton: false, homeButton: false, fullscreenButton: false,
+      infoBox: false, selectionIndicator: true,
+      requestRenderMode: true,         // only render when needed
+      maximumRenderTimeChange: Infinity,
+    });
+
+    (async () => {
+      try { V.terrainProvider = await Cesium.createWorldTerrainAsync(); } catch (_) { }
+    })();
+
+    V.scene.globe.enableLighting = true;
+    V.scene.fog.enabled = true;
+    V.scene.fog.density = 2.0e-4;
+    V.scene.skyAtmosphere.show = true;
+    V.scene.globe.showGroundAtmosphere = true;
+    // Slightly tinted background — space feel
+    V.scene.backgroundColor = Cesium.Color.fromCssColorString("#030508");
+
+    /* ─── DOM bindings ─────────────────────────────────────── */
+    const el = id => document.getElementById(id);
+    const cAC = el("cAC"), cSAT = el("cSAT"), cSL = el("cSL"), cEV = el("cEV");
+    const wsBadge = el("wsBadge"), searchBox = el("searchBox"), evLog = el("evLog");
+    const inspRow = el("insp"), inspGrid = el("inspGrid");
+    const tlSlider = el("tlSlider"), tlLabel = el("tlLabel"), btnLive = el("btnLive");
+    const fpsEl = el("fpsCounter"), dataAgeEl = el("dataAge"), entCountEl = el("entCount"), uptimeEl = el("uptime");
+
+    const togAc = el("togAc"), togSat = el("togSat"), togSL = el("togSL");
+    const togTrail = el("togTrail"), togFollow = el("togFollow"), togZone = el("togZone");
+    const fLEO = el("fLEO"), fMEO = el("fMEO"), fGEO = el("fGEO");
+
+    /* ─── State ────────────────────────────────────────────── */
+    const acMap = new Map();       // id → Cesium entity
+    const satMap = new Map();
+    const acTrails = new Map();    // id → {pts:[], ent:entity}
+    const satTrails = new Map();
+    const MAX_AC_TRAIL = 40;
+    const MAX_SAT_TRAIL = 120;
+
+    let selKey = null;             // {kind, id}
+    let followTmr = null;
+    let slCount = 0;
+    let startTime = Date.now();
+    let lastMsgT = 0;
+
+    /* replay */
+    const replay = [];
+    const REPLAY_SEC = 300;
+    let isLive = true;
+
+    /* ─── Predicted orbit arc ──────────────────────────────── */
+    let predPts = [];
+    V.entities.add({
+      id: "sys:pred",
+      polyline: {
+        positions: new Cesium.CallbackProperty(() => togTrail.checked ? predPts : [], false),
+        width: 2,
+        material: new Cesium.PolylineGlowMaterialProperty({
+          glowPower: 0.25,
+          color: Cesium.Color.CYAN.withAlpha(0.6),
+        }),
+        clampToGround: false,
+      },
+    });
+
+    /* ─── Alert zones ──────────────────────────────────────── */
+    const ZONES = [
+      { n: "North Atlantic Corridor", c: [-60, 40, -10, 40, -10, 60, -60, 60], cl: Cesium.Color.RED },
+      { n: "Middle East Airspace", c: [30, 12, 60, 12, 60, 40, 30, 40], cl: Cesium.Color.ORANGE },
+      { n: "Cape Canaveral Launch", c: [-81.5, 27.5, -79.5, 27.5, -79.5, 29.5, -81.5, 29.5], cl: Cesium.Color.MAGENTA },
+      { n: "Baikonur Launch", c: [62, 44, 67, 44, 67, 47, 62, 47], cl: Cesium.Color.MAGENTA },
+    ];
+    const zoneEnts = ZONES.map(z => V.entities.add({
+      id: `zone:${z.n}`, name: z.n,
+      polygon: {
+        hierarchy: Cesium.Cartesian3.fromDegreesArray(z.c),
+        material: z.cl.withAlpha(0.06),
+        outline: true,
+        outlineColor: z.cl.withAlpha(0.25),
+        outlineWidth: 1,
+        height: 0,
+      },
+    }));
+    togZone.onchange = () => zoneEnts.forEach(e => e.show = togZone.checked);
+
+    /* ─── Helpers ──────────────────────────────────────────── */
+    function orbClass(km) { return km < 2000 ? "LEO" : km < 35000 ? "MEO" : "GEO"; }
+    function isSL(nm) { return nm && nm.toUpperCase().includes("STARLINK"); }
+
+    let sQuery = "";
+    searchBox.oninput = () => { sQuery = searchBox.value.trim().toLowerCase(); };
+    function matchQ(s) { return !sQuery || s.toLowerCase().includes(sQuery); }
+
+    function satVis(s) {
+      if (!togSat.checked) return false;
+      const sl = isSL(s.nm);
+      if (sl && !togSL.checked) return false;
+      const oc = orbClass(s.alt_km);
+      if (oc === "LEO" && !fLEO.checked) return false;
+      if (oc === "MEO" && !fMEO.checked) return false;
+      if (oc === "GEO" && !fGEO.checked) return false;
+      return matchQ(`${s.nm} ${s.id}`);
+    }
+    function satIK(s) { return isSL(s.nm) ? "SL" : orbClass(s.alt_km); }
+
+    /* Cached colors for trails */
+    const trailColor = Cesium.Color.fromCssColorString("#4ade80").withAlpha(0.25);
+    const satTrailColor = Cesium.Color.fromCssColorString("#38bdf8").withAlpha(0.15);
+
+    /* ─── Upsert Aircraft ─────────────────────────────────── */
+    function upsAC(a) {
+      const pos = Cesium.Cartesian3.fromDegrees(a.lon, a.lat, Math.max(0, a.alt || 0));
+      const lbl = a.cs || a.id;
+      const vis = togAc.checked && matchQ(lbl);
+      const ik = planeKey(a.alt || 0, a.gnd);
+
+      // Trail
+      let tr = acTrails.get(a.id);
+      if (!tr) {
+        const pts = [pos];
+        const ent = V.entities.add({
+          id: `atl:${a.id}`,
+          polyline: {
+            positions: new Cesium.CallbackProperty(() =>
+              togTrail.checked && togAc.checked ? (acTrails.get(a.id)?.pts || []) : [], false),
+            width: 1, material: trailColor, clampToGround: false,
+          },
+          show: vis,
+        });
+        tr = { pts, ent };
+        acTrails.set(a.id, tr);
+      } else {
+        tr.pts.push(pos);
+        if (tr.pts.length > MAX_AC_TRAIL) tr.pts.shift();
+        tr.ent.show = vis && togTrail.checked;
+      }
+
+      let ent = acMap.get(a.id);
+      if (!ent) {
+        ent = V.entities.add({
+          id: `ac:${a.id}`, name: lbl, position: pos,
+          billboard: {
+            image: PLANE[ik], width: 20, height: 20,
+            rotation: -Cesium.Math.toRadians(a.hdg || 0),
+            alignedAxis: Cesium.Cartesian3.ZERO,
+            sizeInMeters: false,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        });
+        acMap.set(a.id, ent);
+      } else {
+        ent.position = pos;
+        ent.name = lbl;
+        ent.billboard.image = PLANE[ik];
+        ent.billboard.rotation = -Cesium.Math.toRadians(a.hdg || 0);
+      }
+      ent.show = vis;
+      ent._raw = a;
+    }
+
+    /* ─── Upsert Satellite ────────────────────────────────── */
+    function upsSAT(s) {
+      const pos = new Cesium.Cartesian3(s.ecef[0], s.ecef[1], s.ecef[2]);
+      const vis = satVis(s);
+      const ik = satIK(s);
+
+      let ent = satMap.get(s.id);
+      if (!ent) {
+        ent = V.entities.add({
+          id: `sat:${s.id}`, name: `${s.nm} (${s.id})`, position: pos,
+          billboard: {
+            image: SATIC[ik], width: 14, height: 14,
+            sizeInMeters: false,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        });
+        satMap.set(s.id, ent);
+      } else {
+        ent.position = pos;
+        ent.name = `${s.nm} (${s.id})`;
+        ent.billboard.image = SATIC[ik];
+      }
+      ent.show = vis;
+      ent._raw = s;
+    }
+
+    /* ─── Prune ────────────────────────────────────────────── */
+    function prune(map, keep, cleanup) {
+      for (const id of Array.from(map.keys())) {
+        if (!keep.has(id)) {
+          V.entities.remove(map.get(id));
+          map.delete(id);
+          if (cleanup) cleanup(id);
+        }
+      }
+    }
+
+    /* ─── Events ───────────────────────────────────────────── */
+    const seenEvKeys = new Set();
+    const MAX_SEEN = 2000;
+
+    function renderEvts(evts) {
+      if (!evts || !evts.length) return;
+      for (const e of evts) {
+        const key = `${e.t}:${e.k}:${e.oid}`;
+        if (seenEvKeys.has(key)) continue;
+        seenEvKeys.add(key);
+        // Prevent unbounded growth
+        if (seenEvKeys.size > MAX_SEEN) {
+          const it = seenEvKeys.values();
+          for (let i = 0; i < 500; i++) { it.next(); seenEvKeys.delete(it.next().value); }
+        }
+
+        const d = new Date(e.t * 1000);
+        const ts = d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const div = document.createElement("div");
+        div.className = "ev";
+        div.innerHTML = `<span class="t">${ts}</span><span class="k ${e.k}">${e.k}</span><span>${e.d}</span>`;
+        div.onclick = () => {
+          const ent = acMap.get(e.oid) || satMap.get(e.oid);
+          if (ent) V.selectedEntity = ent;
+        };
+        evLog.prepend(div);
+      }
+      while (evLog.children.length > 100) evLog.removeChild(evLog.lastChild);
+    }
+
+    /* ─── Inspector ────────────────────────────────────────── */
+    function showInsp(kind, raw) {
+      inspRow.classList.add("vis");
+      el("bottomBar").classList.add("sel-active");
+      let items;
+      if (kind === "ac") {
+        const spdKts = ((raw.spd || 0) * 1.94384).toFixed(0);
+        const altFt = ((raw.alt || 0) * 3.28084).toFixed(0);
+        items = [
+          { l: "ICAO24", v: raw.id },
+          { l: "Callsign", v: raw.cs || "—" },
+          { l: "Lat", v: raw.lat?.toFixed(4) },
+          { l: "Lon", v: raw.lon?.toFixed(4) },
+          { l: "Alt", v: `${altFt} ft` },
+          { l: "Speed", v: `${spdKts} kts` },
+          { l: "Heading", v: `${(raw.hdg || 0).toFixed(0)}°` },
+          { l: "V/Rate", v: `${(raw.vr || 0).toFixed(0)} fpm` },
+          { l: "Origin", v: raw.og || "—" },
+          { l: "On Ground", v: raw.gnd ? "Yes" : "No" },
+        ];
+      } else {
+        items = [
+          { l: "NORAD ID", v: raw.id },
+          { l: "Name", v: raw.nm },
+          { l: "Alt", v: `${Math.round(raw.alt_km || 0)} km` },
+          { l: "Orbit", v: orbClass(raw.alt_km || 0) },
+          { l: "Type", v: isSL(raw.nm) ? "Starlink" : "General" },
+        ];
+      }
+      inspGrid.innerHTML = items.map(i =>
+        `<div class="ti"><span class="l">${i.l}</span><span class="v">${i.v}</span></div>`
+      ).join("");
+    }
+    function hideInsp() {
+      inspRow.classList.remove("vis");
+      el("bottomBar").classList.remove("sel-active");
+      inspGrid.innerHTML = "";
+    }
+    el("inspClose").onclick = () => {
+      hideInsp();
+      V.selectedEntity = undefined;
+      selKey = null;
+      predPts = [];
+    };
+
+    /* ─── Camera Follow ────────────────────────────────────── */
+    function startFollow() {
+      if (followTmr) return;
+      followTmr = setInterval(() => {
+        if (!togFollow.checked || !selKey) return;
+        const ent = selKey.kind === "ac" ? acMap.get(selKey.id) : satMap.get(selKey.id);
+        if (!ent?.position) return;
+        const pos = ent.position.getValue ? ent.position.getValue(V.clock.currentTime) : ent.position;
+        if (!pos) return;
+        const range = selKey.kind === "sat" ? 3_500_000 : 250_000;
+        V.camera.lookAt(pos, new Cesium.HeadingPitchRange(V.camera.heading, -0.5, range));
+        V.scene.requestRender();
+      }, 300);
+    }
+    function stopFollow() {
+      if (followTmr) clearInterval(followTmr);
+      followTmr = null;
+      try { V.camera.lookAtTransform(Cesium.Matrix4.IDENTITY); } catch (_) { }
+    }
+    togFollow.onchange = () => togFollow.checked ? startFollow() : stopFollow();
+
+    /* ─── Orbit Prediction ─────────────────────────────────── */
+    async function predict(noradId, mins = 90, step = 20) {
+      try {
+        const r = await fetch(`/sat/${encodeURIComponent(noradId)}/tle`);
+        if (!r.ok) return [];
+        const j = await r.json();
+        if (!j.ok) return [];
+        const satrec = satellite.twoline2satrec(j.tle1, j.tle2);
+        const pts = [];
+        const start = new Date();
+        const n = Math.floor((mins * 60) / step);
+        for (let i = 0; i <= n; i++) {
+          const t = new Date(start.getTime() + i * step * 1000);
+          const pv = satellite.propagate(satrec, t);
+          if (!pv.position) continue;
+          const gmst = satellite.gstime(t);
+          const geo = satellite.eciToGeodetic(pv.position, gmst);
+          pts.push(Cesium.Cartesian3.fromDegrees(
+            satellite.degreesLong(geo.longitude),
+            satellite.degreesLat(geo.latitude),
+            Math.max(0, (geo.height || 0) * 1000),
+          ));
+        }
+        return pts;
+      } catch (_) { return []; }
+    }
+
+    /* ─── Selection ────────────────────────────────────────── */
+    V.selectedEntityChanged.addEventListener(ent => {
+      if (!ent?.id) { selKey = null; hideInsp(); predPts = []; return; }
+      const id = String(ent.id);
+      if (id.startsWith("ac:")) {
+        selKey = { kind: "ac", id: id.slice(3) };
+        predPts = [];
+        if (ent._raw) showInsp("ac", ent._raw);
+      } else if (id.startsWith("sat:")) {
+        const sid = id.slice(4);
+        selKey = { kind: "sat", id: sid };
+        if (ent._raw) showInsp("sat", ent._raw);
+        predPts = [];
+        predict(sid, 90, 20).then(pts => {
+          if (selKey?.kind === "sat" && selKey.id === sid) { predPts = pts; V.scene.requestRender(); }
+        });
+      } else {
+        selKey = null; predPts = []; hideInsp();
+      }
+      startFollow();
+    });
+    startFollow();
+
+    /* ─── Timeline Replay ──────────────────────────────────── */
+    tlSlider.oninput = () => {
+      const val = +tlSlider.value;
+      if (val >= REPLAY_SEC) { goLive(); return; }
+      isLive = false;
+      btnLive.classList.remove("on");
+      const ago = REPLAY_SEC - val;
+      tlLabel.textContent = `-${ago}s`;
+      const target = Date.now() / 1000 - ago;
+      let best = null, bd = Infinity;
+      for (const s of replay) { const d = Math.abs(s.t - target); if (d < bd) { bd = d; best = s; } }
+      if (best) applySnap(best);
+    };
+    btnLive.onclick = goLive;
+    function goLive() {
+      isLive = true;
+      tlSlider.value = REPLAY_SEC;
+      tlLabel.textContent = "LIVE";
+      btnLive.classList.add("on");
+    }
+
+    /* ─── Apply Snapshot ───────────────────────────────────── */
+    function applySnap(msg) {
+      V.entities.suspendEvents();
+      try {
+        const acKeep = new Set();
+        slCount = 0;
+
+        for (const a of msg.ac || []) { acKeep.add(a.id); upsAC(a); }
+        prune(acMap, acKeep, id => {
+          const t = acTrails.get(id);
+          if (t) { V.entities.remove(t.ent); acTrails.delete(id); }
+        });
+
+        const satKeep = new Set();
+        for (const s of msg.sat || []) {
+          satKeep.add(s.id);
+          if (isSL(s.nm)) slCount++;
+          upsSAT(s);
+        }
+        prune(satMap, satKeep, id => satTrails.delete(id));
+
+        renderEvts(msg.ev);
+
+        if (selKey) {
+          const ent = selKey.kind === "ac" ? acMap.get(selKey.id) : satMap.get(selKey.id);
+          if (ent?._raw) showInsp(selKey.kind, ent._raw);
+        }
+
+        cAC.textContent = acMap.size;
+        cSAT.textContent = satMap.size;
+        cSL.textContent = slCount;
+        cEV.textContent = (msg.ev || []).length;
+
+        lastMsgT = msg.t || Date.now() / 1000;
+      } finally {
+        V.entities.resumeEvents();
+        V.scene.requestRender();
+      }
+    }
+
+    /* ─── FPS counter ──────────────────────────────────────── */
+    let fpsFrames = 0, fpsLast = performance.now();
+    function fpsLoop() {
+      fpsFrames++;
+      const now = performance.now();
+      if (now - fpsLast >= 1000) {
+        fpsEl.textContent = fpsFrames + " fps";
+        fpsFrames = 0;
+        fpsLast = now;
+
+        // Mini stats
+        const age = Date.now() / 1000 - lastMsgT;
+        dataAgeEl.textContent = lastMsgT ? (age < 2 ? "LIVE" : age.toFixed(0) + "s") : "—";
+        entCountEl.textContent = acMap.size + satMap.size;
+        const up = Math.floor((Date.now() - startTime) / 1000);
+        const m = Math.floor(up / 60), s = up % 60;
+        uptimeEl.textContent = m > 0 ? `${m}m ${s}s` : `${s}s`;
+      }
+      requestAnimationFrame(fpsLoop);
+    }
+    requestAnimationFrame(fpsLoop);
+
+    /* ─── WebSocket ────────────────────────────────────────── */
+    let ws = null, wsRetry = 1000;
+
+    function connectWS() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+      ws.onopen = () => {
+        wsBadge.textContent = "WS: live";
+        wsBadge.className = "badge ok";
+        wsRetry = 1000;
+        // Ping every 25 seconds
+        ws._ping = setInterval(() => { try { ws.send("ping"); } catch (_) { } }, 25000);
+      };
+      ws.onclose = () => {
+        wsBadge.textContent = "WS: ×";
+        wsBadge.className = "badge err";
+        clearInterval(ws._ping);
+        setTimeout(connectWS, wsRetry);
+        wsRetry = Math.min(wsRetry * 1.5, 10000);
+      };
+      ws.onerror = () => {
+        wsBadge.textContent = "WS: err";
+        wsBadge.className = "badge err";
+      };
+      ws.onmessage = ev => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (_) { return; }
+        if (msg.type === "snapshot") {
+          replay.push(msg);
+          const cutoff = Date.now() / 1000 - REPLAY_SEC;
+          while (replay.length && replay[0].t < cutoff) replay.shift();
+          if (isLive) applySnap(msg);
+        }
+      };
+    }
+    connectWS();
+
+    V.camera.flyTo({ destination: Cesium.Cartesian3.fromDegrees(-30, 20, 25_000_000), duration: 0 });
+  </script>
+</body>
+
+</html>
