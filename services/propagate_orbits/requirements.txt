@@ -1,0 +1,4 @@
+sgp4>=2.23
+pydantic>=2.0.0
+asyncpg>=0.28.0
+nats-py[nkeys]>=2.5.0

@@ -1,0 +1,73 @@
+services:
+  nats:
+    image: nats:latest
+    command: ["-js"]
+    ports: ["4222:4222"]
+
+  postgres:
+    image: kartoza/postgis:16-3.4
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-godseye}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-godseye}
+      POSTGRES_DB: ${POSTGRES_DB:-godseye}
+    volumes:
+      - ./sql:/docker-entrypoint-initdb.d
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: ./services/api/Dockerfile
+    depends_on:
+      - postgres
+      - nats
+    ports: ["8000:8000"]
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  ingest_aircraft:
+    build:
+      context: .
+      dockerfile: ./services/ingest_aircraft/Dockerfile
+    depends_on:
+      - postgres
+      - nats
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  ingest_satcat:
+    build:
+      context: .
+      dockerfile: ./services/ingest_satcat/Dockerfile
+    depends_on:
+      - postgres
+      - nats
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  propagate_orbits:
+    build:
+      context: .
+      dockerfile: ./services/propagate_orbits/Dockerfile
+    depends_on:
+      - postgres
+      - nats
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  viewer:
+    build:
+      context: .
+      dockerfile: ./services/viewer/Dockerfile
+    ports: ["5173:5173"]
+    depends_on:
+      - api
+    env_file: .env
+
+volumes:
+  pgdata:
