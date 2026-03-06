@@ -310,6 +310,21 @@
       color: var(--cyan);
     }
 
+    .k.hijack {
+      color: #ff0000;
+      font-weight: 800;
+    }
+
+    .k.radio_fail {
+      color: var(--amber);
+      font-weight: 800;
+    }
+
+    .k.emergency {
+      color: var(--red);
+      font-weight: 800;
+    }
+
     /* zone legend */
     .zl {
       font-size: 8px;
@@ -553,6 +568,7 @@
     <div class="stat"><i style="background:var(--magenta)"></i>SL <b id="cSL">0</b></div>
     <div class="stat"><i style="background:var(--amber)"></i>EV <b id="cEV">0</b></div>
     <div style="flex:1"></div>
+    <span id="acSrc" class="badge" style="font-size:8px;color:var(--text3)"></span>
     <span id="fpsCounter">-- fps</span>
     <div id="wsBadge" class="badge warn">WS: …</div>
   </div>
@@ -768,8 +784,11 @@
     function upsAC(a) {
       const pos = Cesium.Cartesian3.fromDegrees(a.lon, a.lat, Math.max(0, a.alt || 0));
       const lbl = a.cs || a.id;
-      const vis = togAc.checked && matchQ(lbl);
+      const vis = togAc.checked && matchQ([lbl, a.reg, a.typ].filter(Boolean).join(" "));
       const ik = planeKey(a.alt || 0, a.gnd);
+
+      // Build display name with reg+type if available
+      const fullName = [lbl, a.reg, a.typ].filter(Boolean).join(" · ");
 
       // Trail
       let tr = acTrails.get(a.id);
@@ -795,7 +814,7 @@
       let ent = acMap.get(a.id);
       if (!ent) {
         ent = V.entities.add({
-          id: `ac:${a.id}`, name: lbl, position: pos,
+          id: `ac:${a.id}`, name: fullName, position: pos,
           billboard: {
             image: PLANE[ik], width: 20, height: 20,
             rotation: -Cesium.Math.toRadians(a.hdg || 0),
@@ -807,7 +826,7 @@
         acMap.set(a.id, ent);
       } else {
         ent.position = pos;
-        ent.name = lbl;
+        ent.name = fullName;
         ent.billboard.image = PLANE[ik];
         ent.billboard.rotation = -Cesium.Math.toRadians(a.hdg || 0);
       }
@@ -890,18 +909,30 @@
       if (kind === "ac") {
         const spdKts = ((raw.spd || 0) * 1.94384).toFixed(0);
         const altFt = ((raw.alt || 0) * 3.28084).toFixed(0);
+        const vrFpm = ((raw.vr || 0) / 0.00508).toFixed(0);  // m/s → ft/min
         items = [
           { l: "ICAO24", v: raw.id },
           { l: "Callsign", v: raw.cs || "—" },
+        ];
+        // tar1090-enriched fields
+        if (raw.reg) items.push({ l: "Registration", v: raw.reg });
+        if (raw.typ) items.push({ l: "Aircraft Type", v: raw.typ });
+        items.push(
           { l: "Lat", v: raw.lat?.toFixed(4) },
           { l: "Lon", v: raw.lon?.toFixed(4) },
           { l: "Alt", v: `${altFt} ft` },
           { l: "Speed", v: `${spdKts} kts` },
           { l: "Heading", v: `${(raw.hdg || 0).toFixed(0)}°` },
-          { l: "V/Rate", v: `${(raw.vr || 0).toFixed(0)} fpm` },
-          { l: "Origin", v: raw.og || "—" },
-          { l: "On Ground", v: raw.gnd ? "Yes" : "No" },
-        ];
+          { l: "V/Rate", v: `${vrFpm} fpm` },
+        );
+        if (raw.sqk) {
+          const sqkStyle = ["7500", "7600", "7700"].includes(raw.sqk) ? ' style="color:var(--red)"' : '';
+          items.push({ l: "Squawk", v: raw.sqk, extra: sqkStyle });
+        }
+        if (raw.rss) items.push({ l: "RSSI", v: `${raw.rss} dBFS` });
+        if (raw.cat) items.push({ l: "Category", v: raw.cat });
+        if (raw.og) items.push({ l: "Origin", v: raw.og });
+        items.push({ l: "On Ground", v: raw.gnd ? "Yes" : "No" });
       } else {
         items = [
           { l: "NORAD ID", v: raw.id },
@@ -912,7 +943,7 @@
         ];
       }
       inspGrid.innerHTML = items.map(i =>
-        `<div class="ti"><span class="l">${i.l}</span><span class="v">${i.v}</span></div>`
+        `<div class="ti"><span class="l">${i.l}</span><span class="v"${i.extra || ""}>${i.v}</span></div>`
       ).join("");
     }
     function hideInsp() {

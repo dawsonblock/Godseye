@@ -1,7 +1,7 @@
 """
-Live Earth MVP — Telemetry Hub (v3 — fixed & optimized)
-FastAPI backend: OpenSky aircraft polling, CelesTrak satellite TLE + SGP4,
-anomaly detection, WebSocket fanout.
+Godseye — Telemetry Hub (v4)
+FastAPI backend: tar1090/readsb local ADS-B, OpenSky fallback,
+CelesTrak satellite TLE + SGP4, anomaly detection, WebSocket fanout.
 """
 
 import asyncio
@@ -25,12 +25,18 @@ load_dotenv()
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
+TAR1090_URL = os.getenv("TAR1090_URL", "").strip()
+TAR1090_POLL_SECONDS = float(os.getenv("TAR1090_POLL_SECONDS", "2"))
+
 OPENSKY_USER = os.getenv("OPENSKY_USER", "").strip()
 OPENSKY_PASS = os.getenv("OPENSKY_PASS", "").strip()
 OPENSKY_POLL_SECONDS = float(os.getenv("OPENSKY_POLL_SECONDS", "10"))
+
 SAT_TLE_REFRESH_SECONDS = float(os.getenv("SAT_TLE_REFRESH_SECONDS", "21600"))
 WS_PUSH_HZ = float(os.getenv("WS_PUSH_HZ", "1"))
 SAT_STREAM_LIMIT = int(os.getenv("SAT_STREAM_LIMIT", "2000"))
+
+AC_SOURCE = "tar1090" if TAR1090_URL else "opensky"
 
 # ── App with lifespan ────────────────────────────────────────────────────────
 
@@ -39,16 +45,20 @@ SAT_STREAM_LIMIT = int(os.getenv("SAT_STREAM_LIMIT", "2000"))
 async def lifespan(_app: FastAPI):
     """Start background tasks on startup, cancel on shutdown."""
     tasks = [
-        asyncio.create_task(poll_opensky_loop()),
+        asyncio.create_task(poll_aircraft_loop()),
         asyncio.create_task(refresh_tles_loop()),
         asyncio.create_task(push_loop()),
     ]
+    print(
+        f"[godseye] aircraft source: {AC_SOURCE}"
+        + (f" ({TAR1090_URL})" if AC_SOURCE == "tar1090" else "")
+    )
     yield
     for t in tasks:
         t.cancel()
 
 
-app = FastAPI(title="Live Earth MVP", lifespan=lifespan)
+app = FastAPI(title="Godseye", lifespan=lifespan)
 
 # ── Utilities ────────────────────────────────────────────────────────────────
 
@@ -65,7 +75,6 @@ def rad2deg(r: float) -> float:
     return r * 180.0 / math.pi
 
 
-# WGS-84
 _A = 6378137.0
 _E2 = 6.69437999014e-3
 
@@ -91,7 +100,6 @@ def eci_to_ecef(
 
 
 def ecef_to_geodetic(x: float, y: float, z: float) -> Tuple[float, float, float]:
-    """ECEF (meters) → (lat_deg, lon_deg, alt_m)."""
     lon = math.atan2(y, x)
     p = math.sqrt(x * x + y * y)
     lat = math.atan2(z, p * (1 - _E2))
@@ -106,7 +114,6 @@ def ecef_to_geodetic(x: float, y: float, z: float) -> Tuple[float, float, float]
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in meters."""
     la1, la2 = deg2rad(lat1), deg2rad(lat2)
     dla = la2 - la1
     dlo = deg2rad(lon2 - lon1)
@@ -114,7 +121,7 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 6371000.0 * 2 * math.asin(math.sqrt(a))
 
 
-# ── Aircraft (OpenSky) ──────────────────────────────────────────────────────
+# ── Aircraft State ──────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -131,14 +138,128 @@ class AircraftState:
     last_update: float
     origin: str
     on_ground: bool
+    # tar1090-enriched fields
+    registration: str
+    ac_type: str
+    squawk: str
+    rssi: float
+    category: str
+    source: str  # "tar1090" or "opensky"
 
 
 aircraft: Dict[str, AircraftState] = {}
-prev_aircraft: Dict[str, AircraftState] = {}  # previous poll for anomaly detection
-_poll_anomalies_pending = False  # flag: run anomalies only once per poll
+prev_aircraft: Dict[str, AircraftState] = {}
+_poll_anomalies_pending = False
+
+
+# ── tar1090 / readsb Poller ─────────────────────────────────────────────────
+
+
+async def poll_tar1090_loop():
+    """Poll a local tar1090/readsb aircraft.json endpoint."""
+    global _poll_anomalies_pending
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        while True:
+            try:
+                r = await client.get(TAR1090_URL)
+                if r.status_code == 200:
+                    data = r.json()
+                    t = data.get("now", now_unix())
+                    ac_list = data.get("aircraft", [])
+
+                    prev_aircraft.clear()
+                    prev_aircraft.update(aircraft)
+
+                    for a in ac_list:
+                        try:
+                            icao24 = (a.get("hex") or "").strip().lower()
+                            if not icao24 or icao24.startswith("~"):
+                                continue  # skip non-ICAO (TIS-B)
+
+                            lat = a.get("lat")
+                            lon = a.get("lon")
+                            if lat is None or lon is None:
+                                continue
+
+                            callsign = (a.get("flight") or "").strip()
+
+                            # tar1090 uses feet for altitudes
+                            baro_alt_ft = a.get("alt_baro")
+                            if baro_alt_ft == "ground":
+                                baro_alt_m = 0.0
+                                on_ground = True
+                            elif baro_alt_ft is not None:
+                                baro_alt_m = float(baro_alt_ft) * 0.3048
+                                on_ground = False
+                            else:
+                                baro_alt_m = 0.0
+                                on_ground = a.get("alt_baro") == "ground"
+
+                            geo_alt_ft = a.get("alt_geom")
+                            geo_alt_m = (
+                                float(geo_alt_ft) * 0.3048
+                                if geo_alt_ft is not None
+                                else baro_alt_m
+                            )
+
+                            # tar1090 uses knots for speed
+                            gs_knots = a.get("gs") or 0
+                            vel_mps = float(gs_knots) * 0.514444
+
+                            track = float(a.get("track") or 0)
+
+                            # Vertical rate: tar1090 gives ft/min
+                            baro_rate = a.get("baro_rate") or a.get("geom_rate") or 0
+                            vrate_mps = float(baro_rate) * 0.00508  # ft/min → m/s
+
+                            registration = (a.get("r") or "").strip()
+                            ac_type = (a.get("t") or "").strip()
+                            squawk = (a.get("squawk") or "").strip()
+                            rssi = float(a.get("rssi") or 0)
+                            category = (a.get("category") or "").strip()
+
+                            aircraft[icao24] = AircraftState(
+                                icao24=icao24,
+                                callsign=callsign,
+                                lat=float(lat),
+                                lon=float(lon),
+                                baro_alt_m=baro_alt_m,
+                                geo_alt_m=geo_alt_m,
+                                vel_mps=vel_mps,
+                                heading_deg=track,
+                                vertical_rate=vrate_mps,
+                                last_update=t,
+                                origin="",
+                                on_ground=on_ground,
+                                registration=registration,
+                                ac_type=ac_type,
+                                squawk=squawk,
+                                rssi=rssi,
+                                category=category,
+                                source="tar1090",
+                            )
+                        except Exception:
+                            continue
+
+                    # Prune aircraft not seen recently (tar1090 timeout ~ 60s)
+                    cutoff = t - 60.0
+                    for k in [k for k, v in aircraft.items() if v.last_update < cutoff]:
+                        aircraft.pop(k, None)
+
+                    _poll_anomalies_pending = True
+
+            except Exception as e:
+                print(f"[tar1090] poll error: {e}")
+
+            await asyncio.sleep(TAR1090_POLL_SECONDS)
+
+
+# ── OpenSky Poller (fallback) ───────────────────────────────────────────────
 
 
 async def poll_opensky_loop():
+    """Poll OpenSky Network API when no tar1090 is configured."""
     global _poll_anomalies_pending
     url = "https://opensky-network.org/api/states/all"
     auth = (OPENSKY_USER, OPENSKY_PASS) if (OPENSKY_USER and OPENSKY_PASS) else None
@@ -153,7 +274,6 @@ async def poll_opensky_loop():
                     states = data.get("states") or []
                     t = now_unix()
 
-                    # Snapshot previous state for anomaly detection
                     prev_aircraft.clear()
                     prev_aircraft.update(aircraft)
 
@@ -188,22 +308,34 @@ async def poll_opensky_loop():
                                 last_update=t,
                                 origin=origin,
                                 on_ground=on_ground,
+                                registration="",
+                                ac_type="",
+                                squawk="",
+                                rssi=0.0,
+                                category="",
+                                source="opensky",
                             )
                         except Exception:
                             continue
 
-                    # Prune stale
                     cutoff = t - max(30.0, 3.0 * OPENSKY_POLL_SECONDS)
                     for k in [k for k, v in aircraft.items() if v.last_update < cutoff]:
                         aircraft.pop(k, None)
 
-                    # Flag anomaly detection to run once
                     _poll_anomalies_pending = True
 
             except Exception:
                 pass
 
             await asyncio.sleep(OPENSKY_POLL_SECONDS)
+
+
+# Unified dispatcher
+async def poll_aircraft_loop():
+    if AC_SOURCE == "tar1090":
+        await poll_tar1090_loop()
+    else:
+        await poll_opensky_loop()
 
 
 # ── Satellites (TLE + SGP4) ─────────────────────────────────────────────────
@@ -254,7 +386,6 @@ async def refresh_tles_loop():
                             continue
             except Exception:
                 pass
-
             await asyncio.sleep(SAT_TLE_REFRESH_SECONDS)
 
 
@@ -275,19 +406,25 @@ def propagate_sat_ecef(
 def sat_altitude_km(ecef_m: Tuple[float, float, float]) -> float:
     x, y, z = ecef_m
     r = math.sqrt(x * x + y * y + z * z)
-    return (r - _A) / 1000.0  # rough altitude in km
+    return (r - _A) / 1000.0
 
 
 # ── Anomaly / Event Engine ──────────────────────────────────────────────────
 
-MAX_SPEED_MPS = 370.0  # ~Mach 1.1 at altitude
-MAX_VERTICAL_RATE = 80.0  # m/s
-MAX_HEADING_CHANGE = 60.0  # degrees per poll cycle
-MAX_POSITION_JUMP_M = 100_000.0  # 100 km in one poll
+MAX_SPEED_MPS = 370.0
+MAX_VERTICAL_RATE = 80.0
+MAX_HEADING_CHANGE = 60.0
+MAX_POSITION_JUMP_M = 100_000.0
 
-# Per-object cooldown to prevent event flooding
 _event_cooldown: Dict[str, float] = {}
 EVENT_COOLDOWN_SECS = 30.0
+
+# Squawk anomaly codes
+SQUAWK_ALERTS = {
+    "7500": "hijack",
+    "7600": "radio_fail",
+    "7700": "emergency",
+}
 
 
 @dataclass
@@ -302,12 +439,11 @@ event_buffer: deque = deque(maxlen=500)
 
 
 def _emit_event(kind: str, obj_id: str, detail: str):
-    """Emit event with per-object+kind cooldown to avoid flooding."""
     key = f"{kind}:{obj_id}"
     t = now_unix()
     last = _event_cooldown.get(key, 0)
     if t - last < EVENT_COOLDOWN_SECS:
-        return  # suppress duplicate
+        return
     _event_cooldown[key] = t
     event_buffer.append(Event(t, kind, obj_id, detail))
 
@@ -315,10 +451,16 @@ def _emit_event(kind: str, obj_id: str, detail: str):
 def detect_aircraft_anomalies():
     for icao24, curr in aircraft.items():
         prev = prev_aircraft.get(icao24)
+        label = curr.callsign or curr.registration or icao24
+
+        # Squawk alert codes (always check, no prev needed)
+        if curr.squawk in SQUAWK_ALERTS:
+            _emit_event(
+                SQUAWK_ALERTS[curr.squawk], icao24, f"{label}: squawk {curr.squawk}"
+            )
+
         if prev is None:
             continue
-
-        label = curr.callsign or icao24
 
         # Speed overshoot
         if curr.vel_mps > MAX_SPEED_MPS and not curr.on_ground:
@@ -335,21 +477,17 @@ def detect_aircraft_anomalies():
         if dh > 180:
             dh = 360 - dh
         if dh > MAX_HEADING_CHANGE:
-            _emit_event("rapid_turn", icao24, f"{label}: Δheading {dh:.0f}°")
+            _emit_event("rapid_turn", icao24, f"{label}: Δhdg {dh:.0f}°")
 
-        # Position jump (possible spoofing)
+        # Position jump
         dist = haversine_m(prev.lat, prev.lon, curr.lat, curr.lon)
         if dist > MAX_POSITION_JUMP_M:
-            _emit_event(
-                "position_jump", icao24, f"{label}: jumped {dist / 1000:.0f} km"
-            )
+            _emit_event("position_jump", icao24, f"{label}: jumped {dist/1000:.0f} km")
 
     # Clean old cooldowns
     t = now_unix()
-    stale_keys = [
-        k for k, v in _event_cooldown.items() if t - v > EVENT_COOLDOWN_SECS * 2
-    ]
-    for k in stale_keys:
+    stale = [k for k, v in _event_cooldown.items() if t - v > EVENT_COOLDOWN_SECS * 2]
+    for k in stale:
         del _event_cooldown[k]
 
 
@@ -373,7 +511,7 @@ class Hub:
     async def broadcast(self, msg: dict):
         if not self.clients:
             return
-        payload = json.dumps(msg, separators=(",", ":"))  # compact JSON
+        payload = json.dumps(msg, separators=(",", ":"))
         dead: List[WebSocket] = []
         for ws in self.clients:
             try:
@@ -386,9 +524,6 @@ class Hub:
 
 hub = Hub()
 
-# Cache last-broadcast event list to send only NEW events
-_last_broadcast_event_idx = 0
-
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 
@@ -398,6 +533,7 @@ def health():
     return JSONResponse(
         {
             "ok": True,
+            "aircraft_source": AC_SOURCE,
             "aircraft_count": len(aircraft),
             "sat_count": len(sats),
             "event_count": len(event_buffer),
@@ -441,16 +577,21 @@ def get_events():
 async def ws_endpoint(ws: WebSocket):
     await hub.connect(ws)
     try:
-        await ws.send_text(json.dumps({"type": "hello", "server_time": now_unix()}))
+        await ws.send_text(
+            json.dumps(
+                {
+                    "type": "hello",
+                    "server_time": now_unix(),
+                    "aircraft_source": AC_SOURCE,
+                }
+            )
+        )
         while True:
-            # Keepalive: wait for client pings or detect disconnect
             try:
                 data = await asyncio.wait_for(ws.receive_text(), timeout=60)
-                # respond to pings
                 if data == "ping":
                     await ws.send_text("pong")
             except asyncio.TimeoutError:
-                # No message in 60s — send keepalive check
                 try:
                     await ws.send_text('{"type":"ping"}')
                 except Exception:
@@ -465,34 +606,44 @@ async def ws_endpoint(ws: WebSocket):
 
 
 async def push_loop():
-    global _poll_anomalies_pending, _last_broadcast_event_idx
+    global _poll_anomalies_pending
     period = 1.0 / max(0.2, WS_PUSH_HZ)
 
     while True:
         t = now_unix()
 
-        # Run anomaly detection ONCE per poll, not every push
         if _poll_anomalies_pending:
             detect_aircraft_anomalies()
             _poll_anomalies_pending = False
 
-        # Aircraft snapshot
+        # Aircraft snapshot — include enriched fields
         ac = []
         for v in aircraft.values():
-            ac.append(
-                {
-                    "id": v.icao24,
-                    "cs": v.callsign,
-                    "lat": round(v.lat, 5),
-                    "lon": round(v.lon, 5),
-                    "alt": round(v.geo_alt_m),
-                    "hdg": round(v.heading_deg, 1),
-                    "spd": round(v.vel_mps, 1),
-                    "vr": round(v.vertical_rate, 1),
-                    "og": v.origin,
-                    "gnd": v.on_ground,
-                }
-            )
+            d = {
+                "id": v.icao24,
+                "cs": v.callsign,
+                "lat": round(v.lat, 5),
+                "lon": round(v.lon, 5),
+                "alt": round(v.geo_alt_m),
+                "hdg": round(v.heading_deg, 1),
+                "spd": round(v.vel_mps, 1),
+                "vr": round(v.vertical_rate, 1),
+                "gnd": v.on_ground,
+            }
+            # Include enriched fields only if present (keeps payload small)
+            if v.registration:
+                d["reg"] = v.registration
+            if v.ac_type:
+                d["typ"] = v.ac_type
+            if v.squawk:
+                d["sqk"] = v.squawk
+            if v.rssi:
+                d["rss"] = round(v.rssi, 1)
+            if v.origin:
+                d["og"] = v.origin
+            if v.category:
+                d["cat"] = v.category
+            ac.append(d)
 
         # Satellite snapshot
         sat_items = []
@@ -512,7 +663,7 @@ async def push_loop():
                 }
             )
 
-        # Send only the LAST 50 events (enough for the sidebar)
+        # Events
         recent_events = []
         for e in list(event_buffer)[-50:]:
             recent_events.append(
@@ -528,6 +679,7 @@ async def push_loop():
             {
                 "type": "snapshot",
                 "t": t,
+                "src": AC_SOURCE,
                 "ac": ac,
                 "sat": sat_items,
                 "ev": recent_events,
@@ -537,7 +689,7 @@ async def push_loop():
         await asyncio.sleep(period)
 
 
-# ── Static Frontend (must be LAST so it doesn't shadow API routes) ──────────
+# ── Static Frontend ─────────────────────────────────────────────────────────
 
 FRONTEND_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "frontend")
